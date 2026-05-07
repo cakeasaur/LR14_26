@@ -104,11 +104,38 @@ func (c *Coordinator) Deregister(ctx context.Context) {
 	c.logger.Info("deregistered from etcd", zap.String("key", key))
 }
 
+// computeShard — pure-функция распределения регионов по экземплярам.
+// Детерминирован: сортируем хостнеймы, ищем свой индекс, берём каждый N-й.
+// Если hostname'а нет в peers (race после регистрации) — возвращает все
+// регионы как fallback.
+func computeShard(regions []Region, peers []string, hostname string) (shard []Region, myIdx int, sortedPeers []string) {
+	sortedPeers = make([]string, len(peers))
+	copy(sortedPeers, peers)
+	sort.Strings(sortedPeers)
+
+	myIdx = -1
+	for i, p := range sortedPeers {
+		if p == hostname {
+			myIdx = i
+			break
+		}
+	}
+	if myIdx == -1 {
+		return regions, -1, sortedPeers
+	}
+
+	n := len(sortedPeers)
+	for i, r := range regions {
+		if i%n == myIdx {
+			shard = append(shard, r)
+		}
+	}
+	return shard, myIdx, sortedPeers
+}
+
 // MyShardOf возвращает срез регионов, закреплённых за этим экземпляром.
-// Алгоритм детерминирован: сортируем хостнеймы всех активных сборщиков,
-// определяем свой индекс и берём каждый N-й регион начиная с индекса.
+// Получает peers из etcd, делегирует распределение в computeShard.
 func (c *Coordinator) MyShardOf(ctx context.Context, regions []Region) ([]Region, error) {
-	// получаем всех активных сборщиков
 	resp, err := c.client.Get(ctx, collectorPrefix, clientv3.WithPrefix())
 	if err != nil {
 		return nil, fmt.Errorf("etcd get collectors: %w", err)
@@ -120,39 +147,22 @@ func (c *Coordinator) MyShardOf(ctx context.Context, regions []Region) ([]Region
 		peers = append(peers, key)
 	}
 	if len(peers) == 0 {
-		// fallback: работаем в одиночку
 		peers = []string{c.hostname}
 	}
-	sort.Strings(peers)
 
-	myIdx := -1
-	for i, p := range peers {
-		if p == c.hostname {
-			myIdx = i
-			break
-		}
-	}
+	shard, myIdx, sortedPeers := computeShard(regions, peers, c.hostname)
+
 	if myIdx == -1 {
-		// нас нет в списке (гонка после регистрации) — берём всё
 		c.logger.Warn("hostname not found in peers, taking all regions",
 			zap.String("hostname", c.hostname),
-			zap.Strings("peers", peers))
-		return regions, nil
+			zap.Strings("peers", sortedPeers))
+	} else {
+		c.logger.Info("shard assigned",
+			zap.Int("my_index", myIdx),
+			zap.Int("total_collectors", len(sortedPeers)),
+			zap.Int("shard_size", len(shard)),
+			zap.Strings("peers", sortedPeers))
 	}
-
-	n := len(peers)
-	var shard []Region
-	for i, r := range regions {
-		if i%n == myIdx {
-			shard = append(shard, r)
-		}
-	}
-
-	c.logger.Info("shard assigned",
-		zap.Int("my_index", myIdx),
-		zap.Int("total_collectors", n),
-		zap.Int("shard_size", len(shard)),
-		zap.Strings("peers", peers))
 
 	return shard, nil
 }

@@ -7,10 +7,19 @@ description = "Rust-валидатор демографических запис
 
 [lib]
 name = "demographics_validator"
-crate-type = ["cdylib"]
+# rlib нужен чтобы `cargo test` мог линковать наш крейт.
+# cdylib используется для maturin-сборки в .pyd/.so.
+crate-type = ["cdylib", "rlib"]
+
+[features]
+default = ["extension-module"]
+# Под default-фичей собирается production extension-module; тесты запускаются
+# с --no-default-features --features=test-mode для inline-Python.
+extension-module = ["pyo3/extension-module"]
+test-mode = ["pyo3/auto-initialize"]
 
 [dependencies]
-pyo3 = { version = "0.22", features = ["extension-module", "abi3-py39"] }
+pyo3 = { version = "0.22", features = ["abi3-py39"] }
 
 [profile.release]
 lto = true

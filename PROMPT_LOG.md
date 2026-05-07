@@ -285,6 +285,94 @@ Styler.background_gradient requires matplotlib.
 
 ---
 
+## Дополнительно — Unit-тесты для всего проекта
+
+После сдачи 8 заданий решил добавить полноценное покрытие юнит-тестами всего пайплайна — Python, Go, Rust. Цель — 80% покрытия для каждого слоя.
+
+### Промпт 1 (Python tests):
+```
+Напиши pytest-тесты для analyzer/kafka_consumer.py, dashboard/app.py,
+collector_python/main.py, analyzer/main.py. Цель — 80% покрытия.
+Все в отдельной папке /tests. Без поднятия Kafka/Streamlit/etcd.
+```
+
+**Ответ ИИ:** Сгенерировал 4 файла тестов + conftest.py с фикстурами `sample_records`, `ndjson_file`, `parquet_file`. Использовал `importlib` для загрузки модулей по абсолютному пути, поскольку у нас два `main.py` (`analyzer/` и `collector_python/`) и обычный `sys.path`-импорт даёт конфликт.
+
+**Что исправил:** При первом прогоне 8 тестов analyzer падали с `SystemExit: ❌ Rust-крейт demographics_validator не установлен`. Дело в том, что `analyzer/main.py` делает `import demographics_validator as dv` на module-level и убивает интерпретатор, если крейт не собран через maturin. Добавил мок в conftest.py:
+
+```python
+if "demographics_validator" not in sys.modules:
+    _mock = ModuleType("demographics_validator")
+    _mock.validate_batch = lambda recs: [{"valid": True, "errors": []} for _ in recs]
+    sys.modules["demographics_validator"] = _mock
+```
+
+**Что обнаружили тесты:**
+🔴 **Реальный баг в продакшен-коде**: `con.execute("...read_parquet(?)", [path])` в `analyzer/main.py` падал с `_duckdb.BinderException: Unexpected prepared parameter`. Мой "фикс SQL-инъекции" из аудита Задания 4 **не работал в рантайме** — DuckDB не поддерживает параметризацию для `read_parquet`. Заменил на API:
+```python
+con.register("demo", duckdb.read_parquet(str(path), connection=con))
+```
+
+**Итог:** 49/49 тестов проходят, **покрытие 93.9%**:
+- `analyzer/kafka_consumer.py` — 100%
+- `collector_python/main.py` — 99.1%
+- `analyzer/main.py` — 92.5%
+- `dashboard/app.py` — 84.1%
+
+---
+
+### Промпт 2 (Go tests):
+```
+Напиши Go-тесты для всех pure-функций collector/. Покрой aggregate(),
+matchFilter(), computeShard(), isTopicExistsError(), generateValue(),
+collectRegion(). Тесты рядом с кодом (стандарт Go).
+```
+
+**Ответ ИИ:** Сгенерировал 7 файлов `*_test.go`: aggregator, arrow_server, kafka_producer, generator, coordinator, writer, collector, metrics, arrow_helpers.
+
+**Что исправил:** Чтобы протестировать логику шардирования без поднятого etcd, пришлось рефакторить `MyShardOf` — выделил pure-функцию `computeShard(regions, peers, hostname) ([]Region, int, []string)`, которая теперь тестируется без сети. Сам `MyShardOf` стал тонким wrapper'ом над computeShard + etcd-запрос.
+
+Также нашёл баг в собственных тестах метрик: `defer recover()` после panic в `initMetrics` (повторная регистрация при следующем тесте) приводил к тому, что последующие строки теста не выполнялись — `addRecords`/`incErrors` показывали 0% покрытия. Заменил на `sync.Once` для одноразовой инициализации.
+
+**Итог:** 40/40 тестов проходят, **15 функций покрыты на 100%**: aggregate, matchFilter, computeShard, isTopicExistsError, generateValue, collectRegion, Writer (3 функции), demoSchema, appendRow, approxRecordSize, initMetrics, setQueueDepth, addRecords, incErrors.
+
+Total coverage 26.1% — ограничение `main()` функции (~200 строк парсинга флагов и инициализации) и сетевых функций (etcd Register/Deregister/MyShardOf, KafkaSink Write/Close, gRPC Flight server, HTTP servers). Они требуют integration-тестов с docker-compose.
+
+---
+
+### Промпт 3 (Rust tests):
+```
+Напиши тесты для validator/src/lib.rs. Покрой все 6 правил валидации:
+region, year, indicator, value (с диапазонами по индикатору), NaN/Inf,
+missing fields, wrong types. Включи happy path и edge cases.
+```
+
+**Ответ ИИ:** Сгенерировал `#[cfg(test)] mod tests` с использованием `Python::with_gil` для создания `Bound<PyDict>` в тестах.
+
+**Что исправил:** PyO3 с feature `extension-module` не позволяет запускать `cargo test` — нужен Python host. Реструктурировал `Cargo.toml`:
+```toml
+[features]
+default = ["extension-module"]
+test-mode = ["pyo3/auto-initialize"]
+```
+Теперь `maturin develop --release` использует default (для extension-module), а `cargo test --no-default-features --features=test-mode` запускает тесты с auto-инициализацией Python.
+
+Также пришлось добавить `crate-type = ["cdylib", "rlib"]` — `rlib` нужен чтобы `cargo test` мог линковать наш крейт.
+
+**Итог:** 33/33 теста проходят за 0.13 сек. Покрыты:
+- 7 тестов для `region` (missing, empty, whitespace, too_short, too_long, boundary, wrong_type)
+- 5 тестов для `year` (missing, below_min, above_max, **regression: year=0 теперь invalid**, wrong_type)
+- 4 теста для `indicator` (missing, empty, not_in_list, **regression: wrong_type ловится явно**)
+- 7 тестов для `value` (missing, NaN, Inf, range per indicator, wrong_type)
+- 4 теста для `validate_batch` (length, all_valid, mixed, empty)
+- 2 теста happy-path (single record + все 6 индикаторов)
+- 1 тест на множественные ошибки в одной записи
+- 1 тест на версию
+
+Особо отмечу regression-тесты — они закрывают именно те баги, которые я нашёл в **аудите Задания 4**: пустые строки в region/indicator, sentinel-коллизия year=0, тихое подавление wrong_type через `unwrap_or_default()`. Тесты гарантируют, что эти баги не вернутся.
+
+---
+
 ## Общие наблюдения по работе с ИИ
 
 1. **Аудит после каждого задания спасал жизнь.** Найдено 20+ багов, из них 9 критичных. Особенно ценно ловить вещи типа SQL-инъекций, race conditions и matplotlib-зависимостей, которые в счастливом сценарии не проявляются.
