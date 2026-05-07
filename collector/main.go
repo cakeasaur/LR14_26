@@ -235,6 +235,7 @@ func main() {
 	flightOnly := flag.Bool("flight-only", false, "только запустить Arrow Flight сервер на :8815 (без сбора)")
 	flightSource := flag.String("flight-source", "../data/raw.ndjson", "источник данных для Flight-сервера")
 	enableFlight := flag.Bool("enable-flight", false, "запустить Arrow Flight сервер параллельно со сбором")
+	noEtcd := flag.Bool("no-etcd", false, "запустить без координации через etcd (для standalone-бенчмарка)")
 	flag.Parse()
 
 	// ── режим Flight-only ──
@@ -279,27 +280,37 @@ func main() {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	// ── etcd координация ──
-	etcdEndpoints := strings.Split(*etcdAddr, ",")
-	coord, err := NewCoordinator(etcdEndpoints, logger)
-	if err != nil {
-		logger.Fatal("create coordinator", zap.Error(err))
-	}
-
-	if err := coord.Register(ctx); err != nil {
-		logger.Fatal("register in etcd", zap.Error(err))
-	}
-
-	// небольшая пауза, чтобы все реплики успели зарегистрироваться
-	time.Sleep(500 * time.Millisecond)
-
-	shard, err := coord.MyShardOf(ctx, allRegions)
-	if err != nil {
-		logger.Fatal("shard assignment", zap.Error(err))
+	// ── etcd координация (опционально) ──
+	var coord *Coordinator
+	var shard []Region
+	if *noEtcd {
+		// standalone-режим: берём все регионы себе, без координации
+		shard = allRegions
+		logger.Info("running without etcd coordination",
+			zap.Int("shard_size", len(shard)))
+	} else {
+		etcdEndpoints := strings.Split(*etcdAddr, ",")
+		var err error
+		coord, err = NewCoordinator(etcdEndpoints, logger)
+		if err != nil {
+			logger.Fatal("create coordinator", zap.Error(err))
+		}
+		if err := coord.Register(ctx); err != nil {
+			logger.Fatal("register in etcd", zap.Error(err))
+		}
+		time.Sleep(500 * time.Millisecond)
+		shard, err = coord.MyShardOf(ctx, allRegions)
+		if err != nil {
+			logger.Fatal("shard assignment", zap.Error(err))
+		}
 	}
 
 	// ── health server + Prometheus метрики ──
-	healthSrv := startHealthServer(coord, logger)
+	// В no-etcd режиме health-server не нужен (нет coord), пропускаем
+	var healthSrv *http.Server
+	if coord != nil {
+		healthSrv = startHealthServer(coord, logger)
+	}
 	initMetrics()
 	go startMetricsServer(logger)
 
@@ -389,13 +400,17 @@ func main() {
 	wg.Wait()
 	writer.Close()
 
-	// останавливаем health сервер
-	shutCtx, shutCancel := context.WithTimeout(context.Background(), 3*time.Second)
-	defer shutCancel()
-	healthSrv.Shutdown(shutCtx)
+	// останавливаем health сервер (если он был поднят)
+	if healthSrv != nil {
+		shutCtx, shutCancel := context.WithTimeout(context.Background(), 3*time.Second)
+		defer shutCancel()
+		healthSrv.Shutdown(shutCtx)
+	}
 
-	// отписываемся из etcd
-	coord.Deregister(context.Background())
+	// отписываемся из etcd (если был зарегистрированы)
+	if coord != nil {
+		coord.Deregister(context.Background())
+	}
 
 	logger.Info("collector finished",
 		zap.String("output", *outputPath),

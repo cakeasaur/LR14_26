@@ -1,6 +1,8 @@
 # Go binaries
 collector/demographics-collector
 collector/*.exe
+collector/collector_bench
+collector/collector
 
 # Python cache
 __pycache__/
