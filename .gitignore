@@ -22,6 +22,7 @@ validator/Cargo.lock
 # Data output (large files)
 data/*.ndjson
 data/*.parquet
+data/kafka/
 
 # Charts output
 charts/*.html
