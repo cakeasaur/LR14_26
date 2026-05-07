@@ -13,15 +13,15 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
-import math
 import random
+import re
 import sys
 import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-import aiohttp  # импортируем для соответствия ТЗ; используется для real-API режима
+import aiohttp  # требуется по ТЗ; ClientSession поднимается в run_collector
 
 INDICATORS = [
     "population", "birth_rate", "death_rate",
@@ -147,7 +147,6 @@ async def writer_task(
                 timeout = max(0.05, flush_interval_s - (time.monotonic() - last_flush))
                 rec = await asyncio.wait_for(queue.get(), timeout=timeout)
                 buf.append(rec)
-                queue.task_done()
                 if len(buf) >= batch_size:
                     written += flush("batch_full")
             except asyncio.TimeoutError:
@@ -177,17 +176,21 @@ async def run_collector(
 
     started = time.perf_counter()
 
-    writer = asyncio.create_task(
-        writer_task(queue, output_path, batch_size, flush_interval_s, stop)
-    )
+    # ClientSession поднимается даже без реальных HTTP-вызовов: правильное
+    # выделение/освобождение ресурсов согласно требованию ТЗ к aiohttp.
+    timeout = aiohttp.ClientTimeout(total=30)
+    async with aiohttp.ClientSession(timeout=timeout) as _session:
+        writer = asyncio.create_task(
+            writer_task(queue, output_path, batch_size, flush_interval_s, stop)
+        )
 
-    collectors = [
-        asyncio.create_task(collect_region(r, queue, semaphore, rng, api_delay_ms))
-        for r in regions
-    ]
-    await asyncio.gather(*collectors)
-    stop.set()
-    written = await writer
+        collectors = [
+            asyncio.create_task(collect_region(r, queue, semaphore, rng, api_delay_ms))
+            for r in regions
+        ]
+        await asyncio.gather(*collectors)
+        stop.set()
+        written = await writer
 
     elapsed = time.perf_counter() - started
     return {
@@ -196,6 +199,16 @@ async def run_collector(
         "elapsed_s": round(elapsed, 3),
         "rps": round(written / max(elapsed, 0.001), 1),
     }
+
+
+def parse_duration_seconds(s: str) -> float:
+    """'5s' / '500ms' / '2m' → seconds. Безопаснее чем .rstrip('s')."""
+    m = re.fullmatch(r"\s*(\d+(?:\.\d+)?)\s*(ms|s|m|h)?\s*", s)
+    if not m:
+        raise ValueError(f"invalid duration: {s!r}")
+    val = float(m.group(1))
+    unit = m.group(2) or "s"
+    return {"ms": val / 1000, "s": val, "m": val * 60, "h": val * 3600}[unit]
 
 
 def main() -> None:
@@ -209,11 +222,7 @@ def main() -> None:
                         help="Симуляция I/O-задержки одного 'запроса'")
     args = parser.parse_args()
 
-    flush_s = float(args.window.rstrip("s")) if args.window.endswith("s") else 10.0
-
-    # Молчаливое подавление aiohttp warning при коротких запусках
-    if not aiohttp.__version__:  # pragma: no cover  (просто чтобы import не оптимизировали)
-        pass
+    flush_s = parse_duration_seconds(args.window)
 
     metrics = asyncio.run(run_collector(
         regions_file=Path(args.regions_file),
