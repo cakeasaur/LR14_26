@@ -38,3 +38,8 @@ benchmark/*.html
 .idea/
 .vscode/
 *.swp
+
+# pytest / coverage
+.coverage
+.pytest_cache/
+htmlcov/

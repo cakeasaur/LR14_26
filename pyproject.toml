@@ -1,0 +1,33 @@
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+addopts = "-v --tb=short"
+
+[tool.coverage.run]
+source = ["dashboard", "analyzer", "collector_python"]
+omit = [
+    "*/tests/*",
+    "*/__pycache__/*",
+    # main()-функции в analyzer и collector_python требуют CLI-аргументов и
+    # реальных файлов. Их smoke-проверяем в integration-сценариях.
+    "*/arrow_client.py",  # требует Flight server
+]
+
+[tool.coverage.report]
+precision = 1
+show_missing = true
+skip_covered = false
+exclude_lines = [
+    "pragma: no cover",
+    "raise NotImplementedError",
+    "if __name__ == .__main__.:",
+    "if TYPE_CHECKING:",
+]
+# main()-функции этих модулей запускают Streamlit-сервер / Kafka-консьюмер /
+# CLI-парсер с обращениями к реальной инфраструктуре. Юнит-тесты не должны
+# их покрывать; интеграционно проверены E2E (HTTP 200 от Streamlit, реальный
+# kafka producer→consumer прогон).
+exclude_also = [
+    "def main\\(",
+    "def handle_sigterm",
+]

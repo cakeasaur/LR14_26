@@ -102,11 +102,11 @@ def aggregate_with_duckdb(parquet_path: Path) -> None:
         return
 
     con = duckdb.connect()
-    # Безопасный путь: регистрируем Parquet как view вместо интерполяции в SQL.
-    con.execute(
-        "CREATE VIEW demo AS SELECT * FROM read_parquet(?)",
-        [parquet_path.as_posix()],
-    )
+    # Безопасный путь: используем API duckdb.read_parquet вместо SQL —
+    # там путь подаётся как Python-аргумент, никакой SQL-инъекции в принципе.
+    # (Параметризация `read_parquet(?)` в DuckDB не поддерживается — Binder
+    # error "Unexpected prepared parameter".)
+    con.register("demo", duckdb.read_parquet(str(parquet_path), connection=con))
 
     print("\n— Среднее по показателю и федеральному округу (последние 5 лет) —")
     print(con.execute("""
