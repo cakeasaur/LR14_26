@@ -1,0 +1,23 @@
+# ServiceMonitor для kube-prometheus-stack — Prometheus автоматически
+# обнаружит и начнёт скрейпить метрики коллектора.
+# Применять только если в кластере установлен Prometheus operator.
+#
+# Если оператор не установлен — Prometheus всё равно подхватит /metrics
+# через аннотации prometheus.io/scrape на Service (см. deployment.yaml).
+
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: demographics-collector
+  labels:
+    app: demographics-collector
+    release: kube-prometheus-stack  # ← подмени под имя твоего release-а
+spec:
+  selector:
+    matchLabels:
+      app: demographics-collector
+  endpoints:
+    - port: metrics
+      path: /metrics
+      interval: 15s
+      scrapeTimeout: 10s

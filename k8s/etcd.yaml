@@ -1,0 +1,111 @@
+# ─── etcd: одна нода для minikube (single-replica StatefulSet) ──────────────
+# Headless Service нужен для DNS-имён pod'ов (etcd-0.etcd.default.svc),
+# обычный clusterIP Service — для подключения сборщиков как клиентов.
+
+apiVersion: v1
+kind: Service
+metadata:
+  name: etcd-headless
+  labels:
+    app: etcd
+spec:
+  clusterIP: None
+  selector:
+    app: etcd
+  ports:
+    - name: client
+      port: 2379
+      targetPort: 2379
+    - name: peer
+      port: 2380
+      targetPort: 2380
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: etcd
+  labels:
+    app: etcd
+spec:
+  type: ClusterIP
+  selector:
+    app: etcd
+  ports:
+    - name: client
+      port: 2379
+      targetPort: 2379
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: etcd
+spec:
+  serviceName: etcd-headless
+  replicas: 1
+  selector:
+    matchLabels:
+      app: etcd
+  template:
+    metadata:
+      labels:
+        app: etcd
+    spec:
+      containers:
+        - name: etcd
+          image: bitnami/etcd:3.5.13
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 2379
+              name: client
+            - containerPort: 2380
+              name: peer
+          env:
+            - name: ALLOW_NONE_AUTHENTICATION
+              value: "yes"
+            - name: ETCD_NAME
+              value: etcd-0
+            - name: ETCD_LISTEN_CLIENT_URLS
+              value: http://0.0.0.0:2379
+            - name: ETCD_ADVERTISE_CLIENT_URLS
+              value: http://etcd-0.etcd-headless.default.svc.cluster.local:2379
+            - name: ETCD_LISTEN_PEER_URLS
+              value: http://0.0.0.0:2380
+            - name: ETCD_INITIAL_ADVERTISE_PEER_URLS
+              value: http://etcd-0.etcd-headless.default.svc.cluster.local:2380
+            - name: ETCD_INITIAL_CLUSTER
+              value: etcd-0=http://etcd-0.etcd-headless.default.svc.cluster.local:2380
+            - name: ETCD_INITIAL_CLUSTER_STATE
+              value: new
+            - name: ETCD_INITIAL_CLUSTER_TOKEN
+              value: demographics-cluster
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 256Mi
+          readinessProbe:
+            exec:
+              command:
+                - /opt/bitnami/etcd/bin/etcdctl
+                - endpoint
+                - health
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            tcpSocket:
+              port: 2379
+            initialDelaySeconds: 15
+            periodSeconds: 20
+          volumeMounts:
+            - name: etcd-data
+              mountPath: /bitnami/etcd
+  volumeClaimTemplates:
+    - metadata:
+        name: etcd-data
+      spec:
+        accessModes: [ReadWriteOnce]
+        resources:
+          requests:
+            storage: 1Gi

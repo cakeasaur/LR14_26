@@ -1,0 +1,62 @@
+# ─── Horizontal Pod Autoscaler ──────────────────────────────────────────────
+# Два условия масштабирования (берётся максимум):
+#   1. CPU: средняя утилизация по pods > 70 %
+#   2. Кастомная метрика collector_queue_depth > 80 на pod
+#      (экспортируется из Go через Prometheus /metrics на :9090)
+#
+# Для работы кастомной метрики в кластере должен быть установлен:
+#   - kube-prometheus-stack (Prometheus + ServiceMonitor)
+#   - prometheus-adapter, проксирующий метрики в API
+#       custom.metrics.k8s.io/v1beta2
+# Для CPU достаточно стандартного metrics-server.
+#
+# В minikube включить metrics-server:
+#   minikube addons enable metrics-server
+
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: demographics-collector-hpa
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: demographics-collector
+  minReplicas: 1
+  maxReplicas: 5
+  behavior:
+    # Плавный scale-up: за 60 с не больше +100 % реплик или +2 pod'а
+    scaleUp:
+      stabilizationWindowSeconds: 30
+      policies:
+        - type: Percent
+          value: 100
+          periodSeconds: 60
+        - type: Pods
+          value: 2
+          periodSeconds: 60
+      selectPolicy: Max
+    # Сдержанный scale-down: 5 минут стабилизации, не больше -50 %
+    scaleDown:
+      stabilizationWindowSeconds: 300
+      policies:
+        - type: Percent
+          value: 50
+          periodSeconds: 60
+  metrics:
+    # 1) CPU utilization
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: 70
+
+    # 2) Кастомная метрика — длина очереди в collector
+    - type: Pods
+      pods:
+        metric:
+          name: collector_queue_depth
+        target:
+          type: AverageValue
+          averageValue: "80"

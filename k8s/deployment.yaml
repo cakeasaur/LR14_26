@@ -1,0 +1,134 @@
+# ─── Demographics-Collector: Service + Deployment ───────────────────────────
+
+# Каждый pod пишет в свой emptyDir с уникальным именем файла
+# (см. POD_NAME → OUTPUT_PATH ниже). Это снимает две проблемы:
+#   1) PVC ReadWriteOnce не позволил бы 2+ репликам монтировать один том
+#   2) Concurrent append в один файл из bufio.Writer (256K буфер) теряет
+#      атомарность O_APPEND и портит NDJSON.
+# Для долговременного хранения данных (production) — заменить на
+# объектное хранилище: S3/MinIO sidecar или Kafka producer (см. Задание 5в).
+
+apiVersion: v1
+kind: Service
+metadata:
+  name: demographics-collector
+  labels:
+    app: demographics-collector
+  annotations:
+    # Подсказка для Prometheus operator / kube-prometheus-stack
+    prometheus.io/scrape: "true"
+    prometheus.io/port: "9090"
+    prometheus.io/path: "/metrics"
+spec:
+  type: ClusterIP
+  selector:
+    app: demographics-collector
+  ports:
+    - name: http-health
+      port: 8080
+      targetPort: 8080
+    - name: metrics
+      port: 9090
+      targetPort: 9090
+    - name: arrow-flight
+      port: 8815
+      targetPort: 8815
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: demographics-collector
+  labels:
+    app: demographics-collector
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: demographics-collector
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 1
+      maxSurge: 1
+  template:
+    metadata:
+      labels:
+        app: demographics-collector
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "9090"
+        prometheus.io/path: "/metrics"
+    spec:
+      terminationGracePeriodSeconds: 30
+      # Ждём, пока etcd начнёт принимать соединения, иначе сборщик
+      # уйдёт в CrashLoopBackOff на стартовой гонке.
+      initContainers:
+        - name: wait-for-etcd
+          image: busybox:1.36
+          command:
+            - sh
+            - -c
+            - |
+              until nc -z -w 2 etcd 2379; do
+                echo "waiting for etcd..."
+                sleep 2
+              done
+              echo "etcd is up"
+      containers:
+        - name: collector
+          image: demographics-collector:latest
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http-health
+              containerPort: 8080
+            - name: metrics
+              containerPort: 9090
+            - name: arrow-flight
+              containerPort: 8815
+          env:
+            - name: ETCD_ENDPOINTS
+              value: "etcd:2379"
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            # Каждый pod пишет в свой файл — нет гонки на одном NDJSON
+            - name: OUTPUT_PATH
+              value: "/data/raw-$(POD_NAME).ndjson"
+            - name: WINDOW_SECONDS
+              value: "10s"
+            - name: BATCH_SIZE
+              value: "50"
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 256Mi
+          # Readiness проверяет ВСЁ (включая etcd через /health) — pod
+          # выпадает из Service пока зависимости не готовы.
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: http-health
+            initialDelaySeconds: 5
+            periodSeconds: 5
+            timeoutSeconds: 3
+            failureThreshold: 3
+          # Liveness проверяет только живой ли процесс — иначе при коротком
+          # сбое etcd Kubernetes начнёт каскадно перезапускать все pods.
+          livenessProbe:
+            tcpSocket:
+              port: http-health
+            initialDelaySeconds: 30
+            periodSeconds: 30
+            timeoutSeconds: 5
+            failureThreshold: 3
+          volumeMounts:
+            - name: data
+              mountPath: /data
+      volumes:
+        - name: data
+          emptyDir:
+            sizeLimit: 1Gi
