@@ -329,8 +329,13 @@ func main() {
 	switch *mode {
 	case "kafka":
 		brokers := strings.Split(*kafkaBrokers, ",")
+		// EnsureKafkaTopic теперь распознаёт "already exists" и возвращает
+		// nil; любая другая ошибка — реальная проблема. Не Fatal'ним,
+		// чтобы дать шанс kafka-go retry в Write, но громко логируем.
 		if err := EnsureKafkaTopic(brokers, logger); err != nil {
-			logger.Warn("ensure kafka topic", zap.Error(err))
+			logger.Error("ensure kafka topic failed — продюсер запустится, "+
+				"но Write-операции, скорее всего, упадут",
+				zap.Error(err))
 		}
 		sink = NewKafkaSink(brokers, logger)
 		logger.Info("sink: kafka", zap.Strings("brokers", brokers))

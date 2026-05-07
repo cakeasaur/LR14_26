@@ -3,7 +3,9 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"strings"
 	"sync"
 	"time"
 
@@ -77,15 +79,38 @@ func EnsureKafkaTopic(brokers []string, logger *zap.Logger) error {
 		NumPartitions:     kafkaPartitionsHnt,
 		ReplicationFactor: 1,
 	}}
-	if err := ctrlConn.CreateTopics(cfg...); err != nil {
-		// "Topic already exists" — нормально, не ошибка
-		logger.Info("create topic", zap.Error(err))
-	} else {
+	err = ctrlConn.CreateTopics(cfg...)
+	switch {
+	case err == nil:
 		logger.Info("kafka topic created",
 			zap.String("topic", kafkaTopic),
 			zap.Int("partitions", kafkaPartitionsHnt))
+	case isTopicExistsError(err):
+		// "Topic already exists" — это OK, идём дальше
+		logger.Info("kafka topic already exists",
+			zap.String("topic", kafkaTopic))
+	default:
+		// Любая другая ошибка (broker unreachable, invalid RF и т.д.) —
+		// возвращаем наверх, иначе раньше мы её тихо проглатывали
+		return fmt.Errorf("create topic %q: %w", kafkaTopic, err)
 	}
 	return nil
+}
+
+// isTopicExistsError распознаёт kafka-ошибку "topic already exists" (код 36).
+// kafka-go возвращает либо kafka.Error (typed), либо обёрнутую ошибку —
+// ловим оба варианта.
+func isTopicExistsError(err error) bool {
+	if err == nil {
+		return false
+	}
+	var kerr kafka.Error
+	if errors.As(err, &kerr) && kerr == kafka.TopicAlreadyExists {
+		return true
+	}
+	// Fallback по тексту — более старые версии kafka-go возвращают plain error
+	return strings.Contains(err.Error(), "Topic with this name already exists") ||
+		strings.Contains(err.Error(), "TopicAlreadyExists")
 }
 
 // Write конвертирует пачку DemoRecord в kafka.Message[] и шлёт батчем.
