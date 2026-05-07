@@ -1,0 +1,18 @@
+[package]
+name = "demographics_validator"
+version = "0.1.0"
+edition = "2021"
+authors = ["cakeasaur"]
+description = "Rust-валидатор демографических записей с экспортом в Python через PyO3"
+
+[lib]
+name = "demographics_validator"
+crate-type = ["cdylib"]
+
+[dependencies]
+pyo3 = { version = "0.22", features = ["extension-module", "abi3-py39"] }
+
+[profile.release]
+lto = true
+codegen-units = 1
+opt-level = 3

@@ -12,6 +12,10 @@ venv/
 
 # Rust build
 validator/target/
+validator/Cargo.lock
+*.pdb
+*.so
+*.pyd
 
 # Data output (large files)
 data/*.ndjson
