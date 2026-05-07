@@ -236,6 +236,8 @@ func main() {
 	flightSource := flag.String("flight-source", "../data/raw.ndjson", "источник данных для Flight-сервера")
 	enableFlight := flag.Bool("enable-flight", false, "запустить Arrow Flight сервер параллельно со сбором")
 	noEtcd := flag.Bool("no-etcd", false, "запустить без координации через etcd (для standalone-бенчмарка)")
+	mode := flag.String("mode", "file", "куда писать: file | kafka")
+	kafkaBrokers := flag.String("kafka-brokers", "localhost:9092", "адреса брокеров через запятую")
 	flag.Parse()
 
 	// ── режим Flight-only ──
@@ -321,11 +323,26 @@ func main() {
 		}
 	}
 
-	// ── writer ──
+	// ── sink: file (NDJSON) или kafka — выбирается флагом --mode ──
 	SetAggregatedPath(*outputPath)
-	writer, err := NewWriter(*outputPath)
-	if err != nil {
-		logger.Fatal("open output file", zap.Error(err))
+	var sink Sink
+	switch *mode {
+	case "kafka":
+		brokers := strings.Split(*kafkaBrokers, ",")
+		if err := EnsureKafkaTopic(brokers, logger); err != nil {
+			logger.Warn("ensure kafka topic", zap.Error(err))
+		}
+		sink = NewKafkaSink(brokers, logger)
+		logger.Info("sink: kafka", zap.Strings("brokers", brokers))
+	case "file":
+		fallthrough
+	default:
+		w, err := NewWriter(*outputPath)
+		if err != nil {
+			logger.Fatal("open output file", zap.Error(err))
+		}
+		sink = w
+		logger.Info("sink: file", zap.String("path", *outputPath))
 	}
 
 	// ── каналы ──
@@ -341,7 +358,7 @@ func main() {
 	go func() {
 		defer wg.Done()
 		for batch := range aggCh {
-			if err := writer.Write(batch); err != nil {
+			if err := sink.Write(batch); err != nil {
 				logger.Error("write batch", zap.Error(err))
 				incErrors()
 			} else {
@@ -398,7 +415,9 @@ func main() {
 
 	// ждём записи всех пачек
 	wg.Wait()
-	writer.Close()
+	if err := sink.Close(); err != nil {
+		logger.Warn("sink close", zap.Error(err))
+	}
 
 	// останавливаем health сервер (если он был поднят)
 	if healthSrv != nil {
@@ -413,6 +432,6 @@ func main() {
 	}
 
 	logger.Info("collector finished",
-		zap.String("output", *outputPath),
-		zap.Int("total_written", writer.written))
+		zap.String("mode", *mode),
+		zap.String("output", *outputPath))
 }
