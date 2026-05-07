@@ -1,0 +1,33 @@
+# Go binaries
+collector/demographics-collector
+collector/*.exe
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+*.egg-info/
+
+# Rust build
+validator/target/
+
+# Data output (large files)
+data/*.ndjson
+data/*.parquet
+
+# Charts output
+charts/*.html
+charts/*.png
+
+# Benchmark results (keep results.md, ignore plots)
+benchmark/*.html
+
+# Env
+.env
+
+# IDE
+.idea/
+.vscode/
+*.swp
