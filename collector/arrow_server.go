@@ -8,7 +8,6 @@ import (
 	"net"
 	"os"
 	"strings"
-	"time"
 
 	"github.com/apache/arrow/go/v14/arrow"
 	"github.com/apache/arrow/go/v14/arrow/array"
@@ -213,5 +212,3 @@ func StartArrowFlightServer(ctx context.Context, sourcePath string, logger *zap.
 	return gs, nil
 }
 
-// убираем неиспользованную ссылку на time в случае пустого билда
-var _ = time.Now

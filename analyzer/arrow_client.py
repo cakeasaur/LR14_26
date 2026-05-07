@@ -27,13 +27,11 @@ def fetch_demographics(
         'rows': N,
         'batches': M,
         'transfer_ms': float,
-        'arrow_bytes': int,    # суммарный размер RecordBatch'ей
-        'allocated_mb': float, # пиковая память Arrow
+        'arrow_bytes': int,     # суммарный размер RecordBatch'ей
+        'allocated_mb': float,  # текущая аллокация Arrow allocator (не пик)
     }
     """
-    client = flight.FlightClient(address)
-
-    ticket_payload = {}
+    ticket_payload: dict = {}
     if indicator:
         ticket_payload["indicator"] = indicator
     if year_from:
@@ -45,17 +43,19 @@ def fetch_demographics(
 
     ticket = flight.Ticket(json.dumps(ticket_payload).encode("utf-8"))
 
-    start = time.perf_counter()
-    reader = client.do_get(ticket)
+    # Контекстный менеджер гарантирует освобождение gRPC-канала.
+    with flight.FlightClient(address) as client:
+        start = time.perf_counter()
+        reader = client.do_get(ticket)
 
-    batches: list[pa.RecordBatch] = []
-    total_bytes = 0
-    for chunk in reader:
-        rb = chunk.data
-        batches.append(rb)
-        total_bytes += rb.nbytes
+        batches: list[pa.RecordBatch] = []
+        total_bytes = 0
+        for chunk in reader:
+            rb = chunk.data
+            batches.append(rb)
+            total_bytes += rb.nbytes
 
-    elapsed_ms = (time.perf_counter() - start) * 1000
+        elapsed_ms = (time.perf_counter() - start) * 1000
 
     if not batches:
         df = pl.DataFrame()
@@ -64,7 +64,7 @@ def fetch_demographics(
         df = pl.from_arrow(table)
 
     metrics = {
-        "rows": df.height if df.height else 0,
+        "rows": df.height,
         "batches": len(batches),
         "transfer_ms": round(elapsed_ms, 2),
         "arrow_bytes": total_bytes,

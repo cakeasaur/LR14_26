@@ -3,14 +3,25 @@ package main
 import (
 	"context"
 	"encoding/json"
-	"fmt"
 	"math"
 	"os"
+	"path/filepath"
 	"sort"
 	"time"
 
 	"go.uber.org/zap"
 )
+
+// aggregatedPath задаётся главным main'ом через флаг --output:
+// файл агрегатов кладём рядом с raw.ndjson.
+var aggregatedPath = "../data/aggregated.ndjson"
+
+// SetAggregatedPath переопределяет путь к файлу агрегатов
+// (вызывается из main.go после парсинга флагов).
+func SetAggregatedPath(rawOutput string) {
+	dir := filepath.Dir(rawOutput)
+	aggregatedPath = filepath.Join(dir, "aggregated.ndjson")
+}
 
 // AggRecord — агрегированная запись за одно окно.
 type AggRecord struct {
@@ -59,35 +70,19 @@ func RunAggregator(
 		aggs := aggregate(buf, winStart, winEnd)
 
 		start := time.Now()
-		// конвертируем агрегаты обратно в DemoRecord для единообразной записи
-		out := make([]DemoRecord, 0, len(aggs))
-		for _, a := range aggs {
-			// сохраняем как JSON-строку в одном поле — используем спец.индикатор
-			b, _ := json.Marshal(a)
-			out = append(out, DemoRecord{
-				Region:          a.Region,
-				FederalDistrict: "_aggregated_",
-				Year:            0,
-				Indicator:       fmt.Sprintf("_agg_%s", a.Indicator),
-				Value:           a.Avg,
-				CollectedAt:     winEnd,
-			})
-			_ = b
-		}
-
-		// также пишем исходные записи (задание требует отправлять агрег. пачки)
+		// Отправляем сырые записи writer-горутине (она пишет NDJSON).
+		// Агрегаты сохраняются в отдельный файл logAggregatedToFile.
 		outCh <- buf
 
+		logAggregatedToFile(aggs, logger)
 		elapsed := time.Since(start).Milliseconds()
+
 		logger.Info("window closed",
 			zap.String("reason", reason),
 			zap.Int("raw_records", len(buf)),
 			zap.Int("agg_groups", len(aggs)),
 			zap.Int64("saved_ms", elapsed),
 		)
-		_ = out
-
-		logAggregatedToFile(aggs, logger)
 
 		buf = make([]DemoRecord, 0, batchSize)
 		winStart = time.Now()
@@ -172,7 +167,11 @@ func aggregate(records []DemoRecord, winStart, winEnd time.Time) []AggRecord {
 
 // logAggregatedToFile сохраняет агрегаты в data/aggregated.ndjson.
 func logAggregatedToFile(aggs []AggRecord, logger *zap.Logger) {
-	f, err := os.OpenFile("../data/aggregated.ndjson",
+	if err := os.MkdirAll(filepath.Dir(aggregatedPath), 0755); err != nil {
+		logger.Warn("mkdir aggregated dir", zap.Error(err))
+		return
+	}
+	f, err := os.OpenFile(aggregatedPath,
 		os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
 	if err != nil {
 		logger.Warn("open aggregated file", zap.Error(err))

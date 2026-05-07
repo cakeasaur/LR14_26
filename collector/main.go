@@ -129,17 +129,23 @@ func generateValue(region Region, indicator string, year int, rng *rand.Rand) fl
 }
 
 // collectRegion собирает все показатели по одному региону за 2000–2023.
-func collectRegion(region Region, ch chan<- DemoRecord, rng *rand.Rand) {
+// При отмене контекста (graceful shutdown) выходит, не блокируясь на send.
+func collectRegion(ctx context.Context, region Region, ch chan<- DemoRecord, rng *rand.Rand) {
 	now := time.Now().UTC()
 	for year := 2000; year <= 2023; year++ {
 		for _, ind := range indicators {
-			ch <- DemoRecord{
+			rec := DemoRecord{
 				Region:          region.Name,
 				FederalDistrict: region.FederalDistrict,
 				Year:            year,
 				Indicator:       ind,
 				Value:           generateValue(region, ind, year, rng),
 				CollectedAt:     now,
+			}
+			select {
+			case ch <- rec:
+			case <-ctx.Done():
+				return
 			}
 		}
 	}
@@ -305,6 +311,7 @@ func main() {
 	}
 
 	// ── writer ──
+	SetAggregatedPath(*outputPath)
 	writer, err := NewWriter(*outputPath)
 	if err != nil {
 		logger.Fatal("open output file", zap.Error(err))
@@ -333,47 +340,50 @@ func main() {
 	}()
 
 	// ── горутины сбора по регионам ──
+	// Запускаем в отдельной горутине, чтобы не блокировать основной поток
+	// в семафоре — иначе сигналы SIGINT не будут ловиться во время сбора.
 	sem := make(chan struct{}, *workerCount)
 	var collectWg sync.WaitGroup
-	rng := rand.New(rand.NewSource(time.Now().UnixNano()))
+	baseSeed := time.Now().UnixNano()
 
-	for _, region := range shard {
-		collectWg.Add(1)
-		sem <- struct{}{}
-		go func(r Region) {
-			defer collectWg.Done()
-			defer func() { <-sem }()
-			logger.Debug("collecting region", zap.String("region", r.Name))
-			collectRegion(r, rawCh, rng)
-		}(region)
-	}
+	collectDone := make(chan struct{})
+	go func() {
+	loop:
+		for i, region := range shard {
+			// Проверяем cancel — позволяет прервать запуск новых горутин
+			if ctx.Err() != nil {
+				break loop
+			}
+			collectWg.Add(1)
+			sem <- struct{}{}
+			// Каждой горутине свой *rand.Rand: math/rand не thread-safe.
+			perGoroutineRng := rand.New(rand.NewSource(baseSeed + int64(i)))
+			go func(r Region, rng *rand.Rand) {
+				defer collectWg.Done()
+				defer func() { <-sem }()
+				logger.Debug("collecting region", zap.String("region", r.Name))
+				collectRegion(ctx, r, rawCh, rng)
+			}(region, perGoroutineRng)
+		}
+		collectWg.Wait()
+		close(collectDone)
+	}()
 
 	// ── graceful shutdown ──
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
 
-	go func() {
-		collectWg.Wait()
-		close(rawCh)
-	}()
-
 	select {
 	case sig := <-sigCh:
 		logger.Info("signal received, shutting down", zap.String("signal", sig.String()))
 		cancel()
-		// ждём завершения сборщиков
-		collectWg.Wait()
-		close(rawCh)
-	case <-func() chan struct{} {
-		done := make(chan struct{})
-		go func() {
-			collectWg.Wait()
-			close(done)
-		}()
-		return done
-	}():
+		<-collectDone // дожидаемся завершения уже запущенных горутин
+	case <-collectDone:
 		logger.Info("all regions collected, flushing")
 	}
+
+	// Канал rawCh закрываем строго один раз после завершения всех сборщиков.
+	close(rawCh)
 
 	// ждём записи всех пачек
 	wg.Wait()
