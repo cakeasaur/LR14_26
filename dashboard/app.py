@@ -10,7 +10,6 @@ data/raw.ndjson.
 """
 from __future__ import annotations
 
-import time
 from pathlib import Path
 
 import polars as pl
@@ -42,9 +41,11 @@ def find_latest_dataset() -> Path | None:
     candidates: list[Path] = []
     for ext in ("*.parquet", "*.ndjson"):
         candidates.extend(DATA_DIR.rglob(ext))
+    # Игнорируем служебные/бенчмарк-файлы — они мешают автодетекту "свежих данных"
+    blocked = ("aggregated", "rejected", "_bench", "smoke")
     candidates = [
         p for p in candidates
-        if "aggregated" not in p.name and "rejected" not in p.name
+        if not any(b in p.name for b in blocked)
     ]
     if not candidates:
         return None
@@ -149,6 +150,23 @@ def plot_choropleth(df: pl.DataFrame, indicator: str, year: int) -> go.Figure:
     return fig
 
 
+def _gradient_color(v: float, vmin: float, vmax: float) -> str:
+    """Линейная интерполяция red→yellow→green по value.
+    Не зависит от matplotlib (Styler.background_gradient(cmap=...) требует его).
+    Возвращает CSS color: rgb(r, g, b) для inline-style.
+    """
+    if vmax == vmin:
+        return "background-color: rgb(255, 235, 130)"  # ровно середина → жёлтый
+    t = (v - vmin) / (vmax - vmin)  # 0..1
+    if t < 0.5:
+        # красный → жёлтый
+        r, g, b = 235, int(80 + (235 - 80) * (t * 2)), 80
+    else:
+        # жёлтый → зелёный
+        r, g, b = int(235 - (235 - 80) * ((t - 0.5) * 2)), 200, int(80 + (140 - 80) * ((t - 0.5) * 2))
+    return f"background-color: rgb({r}, {g}, {b})"
+
+
 def conditional_format_table(df: pl.DataFrame, indicator: str, year: int):
     """Топ-20 регионов с подсветкой относительно медианы."""
     sub = df.filter(
@@ -158,13 +176,18 @@ def conditional_format_table(df: pl.DataFrame, indicator: str, year: int):
         st.info("Нет данных для выбранного показателя/года")
         return
     pdf = sub.sort("value", descending=True).head(20).to_pandas()
-    median = pdf["value"].median()
-    styled = pdf[["region", "federal_district", "value"]].style.background_gradient(
-        subset=["value"],
-        cmap="RdYlGn",
-        vmin=pdf["value"].min(),
-        vmax=pdf["value"].max(),
-    ).format({"value": "{:.2f}"})
+    median = float(pdf["value"].median())
+    vmin, vmax = float(pdf["value"].min()), float(pdf["value"].max())
+
+    def style_value(v: float) -> str:
+        return _gradient_color(v, vmin, vmax)
+
+    styled = (
+        pdf[["region", "federal_district", "value"]]
+        .style
+        .map(style_value, subset=["value"])  # element-wise styling, без matplotlib
+        .format({"value": "{:.2f}"})
+    )
     st.caption(f"Медиана = {median:.2f}; зелёный — выше, красный — ниже")
     st.dataframe(styled, use_container_width=True, height=600)
 
@@ -231,9 +254,14 @@ def main() -> None:
     )
 
     # ── KPI ──
+    pop_label = (
+        "Население РФ"
+        if len(districts) == len(all_districts)
+        else f"Население ({len(districts)} округов)"
+    )
     c1, c2, c3 = st.columns(3)
     with c1:
-        st.metric("Население РФ", kpi_population(filtered))
+        st.metric(pop_label, kpi_population(filtered))
     with c2:
         st.metric("Ср. ожидаемая продолжительность", kpi_life_expectancy(filtered))
     with c3:
@@ -269,12 +297,14 @@ def main() -> None:
         conditional_format_table(filtered, indicator, table_year)
 
     # ── автообновление ──
+    # Используем HTML meta refresh вместо time.sleep(30) — sleep блокировал
+    # бы main-thread Streamlit, не давая выключить toggle до истечения 30с.
+    # Meta refresh выполняется браузером, страница остаётся отзывчивой.
     if autorefresh:
-        # Простое решение: спим, затем перерисовываем. st.rerun планирует
-        # перезапуск скрипта с актуализированным cache_data.
-        time.sleep(30)
-        st.cache_data.clear()
-        st.rerun()
+        st.markdown(
+            '<meta http-equiv="refresh" content="30">',
+            unsafe_allow_html=True,
+        )
 
 
 if __name__ == "__main__":
