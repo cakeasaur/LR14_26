@@ -102,12 +102,18 @@ def aggregate_with_duckdb(parquet_path: Path) -> None:
         return
 
     con = duckdb.connect()
+    # Безопасный путь: регистрируем Parquet как view вместо интерполяции в SQL.
+    con.execute(
+        "CREATE VIEW demo AS SELECT * FROM read_parquet(?)",
+        [parquet_path.as_posix()],
+    )
+
     print("\n— Среднее по показателю и федеральному округу (последние 5 лет) —")
-    print(con.execute(f"""
+    print(con.execute("""
         SELECT federal_district, indicator,
                ROUND(AVG(value), 2) AS avg_val,
                COUNT(*)             AS n
-        FROM read_parquet('{parquet_path.as_posix()}')
+        FROM demo
         WHERE year >= 2019
         GROUP BY federal_district, indicator
         ORDER BY federal_district, indicator
@@ -115,9 +121,9 @@ def aggregate_with_duckdb(parquet_path: Path) -> None:
     """).fetchdf())
 
     print("\n— Топ-10 регионов по продолжительности жизни (2023) —")
-    print(con.execute(f"""
+    print(con.execute("""
         SELECT region, ROUND(value, 1) AS life_expectancy
-        FROM read_parquet('{parquet_path.as_posix()}')
+        FROM demo
         WHERE indicator = 'life_expectancy' AND year = 2023
         ORDER BY value DESC
         LIMIT 10
