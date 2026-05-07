@@ -50,6 +50,12 @@ spec:
       labels:
         app: etcd
     spec:
+      # bitnami/etcd работает от uid 1001 и пишет в /bitnami/etcd.
+      # Без fsGroup PVC будет owned by root → запись упадёт.
+      securityContext:
+        runAsUser: 1001
+        runAsGroup: 1001
+        fsGroup: 1001
       containers:
         - name: etcd
           image: bitnami/etcd:3.5.13

@@ -15,8 +15,10 @@ COPY *.go ./
 COPY regions.json ./
 
 # CGO отключён — получаем полностью статический бинарь, который
-# запустится на голом alpine без glibc.
-ENV CGO_ENABLED=0 GOOS=linux GOARCH=amd64
+# запустится на голом alpine без glibc. GOARCH берём от --platform
+# (мульти-арх через TARGETARCH), что позволяет собирать и под ARM.
+ARG TARGETARCH=amd64
+ENV CGO_ENABLED=0 GOOS=linux GOARCH=$TARGETARCH
 RUN go build -trimpath -ldflags="-s -w" -o /out/collector .
 
 # ─── Stage 2: runtime ───────────────────────────────────────────────────────
@@ -24,8 +26,11 @@ FROM alpine:3.19
 
 # Только минимум: ca-certs для grpc/http к etcd. Probe выполняет kubelet
 # снаружи через httpGet, ничего внутри контейнера не требуется.
+# Фиксируем UID/GID = 10001, чтобы k8s securityContext.fsGroup мог
+# совпасть и emptyDir/PVC мог быть group-writable.
 RUN apk add --no-cache ca-certificates && \
-    addgroup -S app && adduser -S -G app app && \
+    addgroup -g 10001 app && \
+    adduser -D -u 10001 -G app app && \
     mkdir -p /app /data && chown -R app:app /app /data
 
 WORKDIR /app

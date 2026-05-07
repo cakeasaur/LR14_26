@@ -60,6 +60,15 @@ spec:
         prometheus.io/path: "/metrics"
     spec:
       terminationGracePeriodSeconds: 30
+      # Pod запускается под non-root user 10001 (см. Dockerfile).
+      # fsGroup обеспечивает, что смонтированные тома (emptyDir, PVC)
+      # принадлежат группе 10001 и доступны на запись — без этого
+      # /data был бы owned by root и запись падала бы с EACCES.
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        fsGroup: 10001
       # Ждём, пока etcd начнёт принимать соединения, иначе сборщик
       # уйдёт в CrashLoopBackOff на стартовой гонке.
       initContainers:
