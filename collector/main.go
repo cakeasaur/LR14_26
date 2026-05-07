@@ -226,7 +226,27 @@ func main() {
 	windowFlag := flag.String("window", "10s", "flush interval (tumbling window)")
 	batchSize := flag.Int("batch", 50, "flush after N records")
 	workerCount := flag.Int("workers", 8, "number of goroutines per shard")
+	flightOnly := flag.Bool("flight-only", false, "только запустить Arrow Flight сервер на :8815 (без сбора)")
+	flightSource := flag.String("flight-source", "../data/raw.ndjson", "источник данных для Flight-сервера")
+	enableFlight := flag.Bool("enable-flight", false, "запустить Arrow Flight сервер параллельно со сбором")
 	flag.Parse()
+
+	// ── режим Flight-only ──
+	if *flightOnly {
+		logger, _ := zap.NewProduction()
+		defer logger.Sync()
+		ctx, cancel := context.WithCancel(context.Background())
+		_, err := StartArrowFlightServer(ctx, *flightSource, logger)
+		if err != nil {
+			logger.Fatal("flight server failed", zap.Error(err))
+		}
+		sigCh := make(chan os.Signal, 1)
+		signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
+		<-sigCh
+		cancel()
+		time.Sleep(500 * time.Millisecond)
+		return
+	}
 
 	// парсим window duration
 	windowDur, err := time.ParseDuration(*windowFlag)
@@ -276,6 +296,13 @@ func main() {
 	healthSrv := startHealthServer(coord, logger)
 	initMetrics()
 	go startMetricsServer(logger)
+
+	// ── опционально: Arrow Flight сервер параллельно со сбором ──
+	if *enableFlight {
+		if _, err := StartArrowFlightServer(ctx, *flightSource, logger); err != nil {
+			logger.Warn("flight server failed", zap.Error(err))
+		}
+	}
 
 	// ── writer ──
 	writer, err := NewWriter(*outputPath)
