@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
 	"math"
@@ -178,8 +179,10 @@ func logAggregatedToFile(aggs []AggRecord, logger *zap.Logger) {
 		return
 	}
 	defer f.Close()
-	enc := json.NewEncoder(f)
+	bw := bufio.NewWriter(f)
+	enc := json.NewEncoder(bw)
 	for _, a := range aggs {
 		enc.Encode(a)
 	}
+	bw.Flush()
 }

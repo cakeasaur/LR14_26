@@ -274,7 +274,7 @@ def main() -> None:
         st.plotly_chart(plot_dynamics(filtered, indicator), use_container_width=True)
 
     with tab2:
-        last_year = int(filtered["year"].max() or year_range[1])
+        last_year = year_range[1] if filtered.height == 0 else int(filtered["year"].max())
         chart_year = st.slider(
             "Год для среза",
             min_value=year_range[0], max_value=year_range[1],
@@ -287,7 +287,7 @@ def main() -> None:
         )
 
     with tab3:
-        last_year = int(filtered["year"].max() or year_range[1])
+        last_year = year_range[1] if filtered.height == 0 else int(filtered["year"].max())
         table_year = st.slider(
             "Год для таблицы",
             min_value=year_range[0], max_value=year_range[1],

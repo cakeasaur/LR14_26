@@ -181,8 +181,12 @@ func (w *Writer) Write(records []DemoRecord) error {
 		if err != nil {
 			return err
 		}
-		w.bw.Write(b)
-		w.bw.WriteByte('\n')
+		if _, err = w.bw.Write(b); err != nil {
+			return err
+		}
+		if err = w.bw.WriteByte('\n'); err != nil {
+			return err
+		}
 		w.written++
 	}
 	return w.bw.Flush()
@@ -191,7 +195,10 @@ func (w *Writer) Write(records []DemoRecord) error {
 func (w *Writer) Close() error {
 	w.mu.Lock()
 	defer w.mu.Unlock()
-	w.bw.Flush()
+	if err := w.bw.Flush(); err != nil {
+		w.file.Close()
+		return err
+	}
 	return w.file.Close()
 }
 
