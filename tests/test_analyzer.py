@@ -1,8 +1,12 @@
 """
-Тесты для analyzer/main.py — pure-функции (load_raw, to_parquet).
-validate_records зависит от Rust-крейта demographics_validator (binding'и),
-поэтому тестируем отдельно через моки. aggregate_with_duckdb — smoke-тест
-с реальным parquet.
+Тесты для analyzer/main.py — pure-функции (load_raw, to_parquet,
+validate_with_rust, aggregate_with_duckdb).
+
+После рефактора d788c9a весь пайплайн работает на pl.DataFrame, а
+не на list[dict]: load_raw возвращает DataFrame, to_parquet ожидает
+DataFrame, validate_with_rust принимает DataFrame и возвращает
+(DataFrame, list[rejected]). aggregate_with_duckdb теперь требует
+второй аргумент — замеренное время Polars-агрегации для сравнения.
 """
 from __future__ import annotations
 
@@ -18,13 +22,12 @@ import pytest
 
 def test_load_raw_reads_records(analyzer_main_mod, ndjson_file):
     fn = analyzer_main_mod.load_raw
-    records = fn(ndjson_file)
-    # фикстура содержит 8 (4 region × 2 year × 6 ind…) — но через ndjson_file
-    # 4 регионa × 2 года × 6 показателей = 48 + 1 _agg_ = 49 строк, _agg_ должна
-    # быть отфильтрована, итого 48
-    assert len(records) == 48
+    df = fn(ndjson_file)
+    # фикстура: 4 региона × 2 года × 6 показателей = 48 строк + 1 _agg_,
+    # _agg_ отфильтрована load_raw'ом → 48
+    assert df.height == 48
     # не должно быть _agg_ записей
-    assert not any(r["indicator"].startswith("_agg_") for r in records)
+    assert not df["indicator"].str.starts_with("_agg_").any()
 
 
 def test_load_raw_skips_empty_lines(analyzer_main_mod, tmp_path: Path):
@@ -37,8 +40,8 @@ def test_load_raw_skips_empty_lines(analyzer_main_mod, tmp_path: Path):
         f.write("   \n")
         f.write('{"region": "B", "indicator": "death_rate", "year": 2023, '
                 '"value": 13.0, "federal_district": "ЦФО"}\n')
-    records = fn(p)
-    assert len(records) == 2
+    df = fn(p)
+    assert df.height == 2
 
 
 def test_load_raw_skips_agg_records(analyzer_main_mod, tmp_path: Path):
@@ -49,36 +52,36 @@ def test_load_raw_skips_agg_records(analyzer_main_mod, tmp_path: Path):
                 '"year": 0, "value": 11.0, "federal_district": "_aggregated_"}\n')
         f.write('{"region": "Y", "indicator": "birth_rate", '
                 '"year": 2023, "value": 10.0, "federal_district": "ЦФО"}\n')
-    records = fn(p)
-    assert len(records) == 1
-    assert records[0]["region"] == "Y"
+    df = fn(p)
+    assert df.height == 1
+    assert df.row(0, named=True)["region"] == "Y"
 
 
 # ─── to_parquet ─────────────────────────────────────────────────────────
 
 
-def test_to_parquet_writes_zstd(analyzer_main_mod, tmp_path: Path, sample_records):
+def test_to_parquet_writes_zstd(analyzer_main_mod, tmp_path: Path, sample_df):
     fn = analyzer_main_mod.to_parquet
     out = tmp_path / "clean.parquet"
-    fn(sample_records, out)
+    fn(sample_df, out)
     assert out.exists()
     df = pl.read_parquet(out)
-    assert df.height == len(sample_records)
+    assert df.height == sample_df.height
 
 
 def test_to_parquet_empty_skip(analyzer_main_mod, tmp_path: Path, capsys):
     fn = analyzer_main_mod.to_parquet
     out = tmp_path / "empty.parquet"
-    fn([], out)
+    fn(pl.DataFrame(), out)
     assert not out.exists()
     captured = capsys.readouterr()
     assert "пуст" in captured.out
 
 
-# ─── validate_records через mock ────────────────────────────────────────
+# ─── validate_with_rust через mock ──────────────────────────────────────
 
 
-def test_validate_records_with_mock(analyzer_main_mod, sample_records, monkeypatch):
+def test_validate_with_rust_all_valid(analyzer_main_mod, sample_df, monkeypatch):
     """Подменяем Rust-валидатор на python mock — все валидны."""
     class MockDV:
         @staticmethod
@@ -90,12 +93,13 @@ def test_validate_records_with_mock(analyzer_main_mod, sample_records, monkeypat
             return [{"valid": True, "errors": []} for _ in records]
 
     monkeypatch.setattr(analyzer_main_mod, "dv", MockDV)
-    clean, rejected = analyzer_main_mod.validate_records(sample_records)
-    assert len(clean) == len(sample_records)
+    monkeypatch.setattr(analyzer_main_mod, "_HAS_VALIDATOR", True)
+    clean, rejected = analyzer_main_mod.validate_with_rust(sample_df)
+    assert clean.height == sample_df.height
     assert rejected == []
 
 
-def test_validate_records_filters_invalid(analyzer_main_mod, sample_records, monkeypatch):
+def test_validate_with_rust_filters_invalid(analyzer_main_mod, sample_df, monkeypatch):
     """Mock возвращает половину записей как невалидные."""
     class MockDV:
         @staticmethod
@@ -113,9 +117,10 @@ def test_validate_records_filters_invalid(analyzer_main_mod, sample_records, mon
             return results
 
     monkeypatch.setattr(analyzer_main_mod, "dv", MockDV)
-    clean, rejected = analyzer_main_mod.validate_records(sample_records)
-    assert len(clean) == len(sample_records) // 2
-    assert len(rejected) == len(sample_records) // 2
+    monkeypatch.setattr(analyzer_main_mod, "_HAS_VALIDATOR", True)
+    clean, rejected = analyzer_main_mod.validate_with_rust(sample_df)
+    assert clean.height == sample_df.height // 2
+    assert len(rejected) == sample_df.height - clean.height
     # rejected — это {record, errors}
     assert "errors" in rejected[0]
     assert "record" in rejected[0]
@@ -125,8 +130,9 @@ def test_validate_records_filters_invalid(analyzer_main_mod, sample_records, mon
 
 
 def test_aggregate_with_duckdb_smoke(analyzer_main_mod, parquet_file, capsys):
-    """Smoke-test: запускается без падения, что-то печатает."""
+    """Smoke-test: запускается без падения, что-то печатает.
+    Второй аргумент — время Polars-агрегации (для строки сравнения)."""
     fn = analyzer_main_mod.aggregate_with_duckdb
-    fn(parquet_file)
+    fn(parquet_file, polars_agg_ms=1.0)
     captured = capsys.readouterr()
-    assert "федеральному" in captured.out or "округу" in captured.out
+    assert "DuckDB" in captured.out
