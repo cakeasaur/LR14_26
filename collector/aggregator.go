@@ -71,8 +71,9 @@ func RunAggregator(
 		aggs := aggregate(buf, winStart, winEnd)
 
 		start := time.Now()
-		// Отправляем сырые записи writer-горутине (она пишет NDJSON).
-		// Агрегаты сохраняются в отдельный файл logAggregatedToFile.
+		// Отправляем сырые записи sink-горутине (она пишет в NDJSON или Kafka,
+		// в зависимости от --mode). Агрегаты сохраняются в отдельный файл через
+		// logAggregatedToFile — это локальный артефакт окна для отладки.
 		outCh <- buf
 
 		logAggregatedToFile(aggs, logger)

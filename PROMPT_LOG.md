@@ -308,16 +308,17 @@ if "demographics_validator" not in sys.modules:
 ```
 
 **Что обнаружили тесты:**
-🔴 **Реальный баг в продакшен-коде**: `con.execute("...read_parquet(?)", [path])` в `analyzer/main.py` падал с `_duckdb.BinderException: Unexpected prepared parameter`. Мой "фикс SQL-инъекции" из аудита Задания 4 **не работал в рантайме** — DuckDB не поддерживает параметризацию для `read_parquet`. Заменил на API:
+🔴 **Реальный баг в продакшен-коде**: `con.execute("...read_parquet(?)", [path])` в `analyzer/main.py` падал с `_duckdb.BinderException: Unexpected prepared parameter`. Мой "фикс SQL-инъекции" из аудита Задания 4 **не работал в рантайме** — DuckDB не поддерживает параметризацию для `read_parquet`. Сначала заменил на `duckdb.read_parquet(path, connection=con)`, но в более поздних версиях duckdb этот kwarg тоже нестабилен. Финальный вариант — через method connection:
 ```python
-con.register("demo", duckdb.read_parquet(str(path), connection=con))
+rel = con.read_parquet(str(parquet_path))
+con.register("demo", rel)
 ```
 
-**Итог:** 49/49 тестов проходят, **покрытие 93.9%**:
-- `analyzer/kafka_consumer.py` — 100%
-- `collector_python/main.py` — 99.1%
-- `analyzer/main.py` — 92.5%
-- `dashboard/app.py` — 84.1%
+**Итог:** 49/49 тестов проходят, текущее покрытие **83.5 %** (после рефактора analyzer/main.py с расширением функционала):
+- `analyzer/kafka_consumer.py` — 100 %
+- `collector_python/main.py` — 99.1 %
+- `dashboard/app.py` — 84.1 %
+- `analyzer/main.py` — 59.5 % (новые функции `clean_with_polars`, `aggregate_with_polars`, `save_charts` не покрыты юнит-тестами; smoke-проверка работоспособности — через ручной прогон `python analyzer/main.py`).
 
 ---
 
